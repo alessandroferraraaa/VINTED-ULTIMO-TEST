@@ -23,7 +23,7 @@ import threading
 
 CONFIG = {
     # DISCORD WEBHOOK (optional)
-    "DISCORD_WEBHOOK_URL": "",  # Leave empty to disable
+    "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/1463620269716541724/rJxqC0ChU3cEWpNoggTBlS6UsWA7iRxFlttYxDU-_4KqIdGQH-qKFrNA2haPWw_nFBu3",  # Leave empty to disable
     
     # TELEGRAM WEBHOOK (optional)
     "TELEGRAM_BOT_TOKEN": "",   # Leave empty to disable
