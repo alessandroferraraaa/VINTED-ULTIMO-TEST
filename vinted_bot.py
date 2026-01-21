@@ -2,27 +2,35 @@
 """
 VINTED FOOTBALL TRACKSUIT BOT 🔍⚽
 Monitor real-time adult complete football tracksuits (jacket + long pants)
-Browser-like requests to bypass anti-scraping
+Using Selenium for real browser automation to bypass API restrictions
 """
 
 import sys
 import subprocess
 
-try:
-    import requests
-except ImportError:
-    print("[INSTALLING] requests...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
-    import requests
+# Auto-install dependencies
+required_packages = ["selenium", "webdriver-manager"]
+for package in required_packages:
+    try:
+        __import__(package.replace("-", "_"))
+    except ImportError:
+        print(f"[INSTALLING] {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 
 import json
 import time
 import logging
-import re
 from datetime import datetime
 from typing import Dict, List, Optional
 import sqlite3
-import random
 
 # ============================================================================
 # CONFIGURATION
@@ -32,11 +40,10 @@ CONFIG = {
     "DISCORD_WEBHOOK_URL": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_CHAT_ID": "",
-    "CHECK_INTERVAL": 60,
+    "CHECK_INTERVAL": 120,  # Increased for Selenium
     "DB_NAME": "vinted_bot.db",
     "LOG_LEVEL": logging.INFO,
-    "RETRY_ATTEMPTS": 3,
-    "RETRY_DELAY": 2,
+    "HEADLESS": True,  # Run without GUI
 }
 
 # ============================================================================
@@ -126,35 +133,25 @@ def check_forbidden_keywords(text: str) -> bool:
         return False
     
     text_lower = text.lower()
-    
-    for keyword in FORBIDDEN_KEYWORDS:
+    for keyword in FORBIDDEN_KEYWORDS + FORBIDDEN_AGE_KEYWORDS:
         if keyword in text_lower:
             return True
-    
-    for keyword in FORBIDDEN_AGE_KEYWORDS:
-        if keyword in text_lower:
-            return True
-    
     return False
 
 def check_team(title: str) -> Optional[str]:
     """Extract and validate team name"""
     text = title.lower()
-    
     for team in APPROVED_TEAMS:
         if team in text:
             return team
-    
     return None
 
 def check_brand(title: str) -> Optional[str]:
     """Extract and validate brand name"""
     text = title.lower()
-    
     for brand in APPROVED_BRANDS:
         if brand in text:
             return brand
-    
     return None
 
 def is_valid_tracksuit(title: str) -> tuple:
@@ -179,98 +176,6 @@ def is_valid_tracksuit(title: str) -> tuple:
     return True, "Valid"
 
 # ============================================================================
-# WEB SCRAPING
-# ============================================================================
-
-def get_browser_headers():
-    """Get realistic browser headers"""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ]
-    
-    return {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Referer": "https://www.vinted.it/",
-    }
-
-def create_session():
-    """Create requests session with realistic settings"""
-    session = requests.Session()
-    session.headers.update(get_browser_headers())
-    session.timeout = 15
-    return session
-
-def fetch_items_with_retry(session, url, params, max_retries=3):
-    """Fetch items from Vinted with retry logic"""
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} - Fetching {url}...")
-            
-            response = session.get(url, params=params, timeout=15)
-            
-            if response.status_code == 429:
-                wait_time = 30 * (attempt + 1)
-                logger.warning(f"⏸️ Rate limited! Waiting {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            
-            if response.status_code == 403:
-                logger.warning(f"🚫 Forbidden (403) - Vinted blocking requests. Waiting 120s...")
-                time.sleep(120)
-                continue
-            
-            if response.status_code != 200:
-                logger.warning(f"⚠️ Status {response.status_code}")
-                if attempt < max_retries - 1:
-                    time.sleep(CONFIG["RETRY_DELAY"] * (attempt + 1))
-                continue
-            
-            try:
-                data = response.json()
-                items = data.get("items", [])
-                if items:
-                    logger.info(f"✅ Successfully fetched {len(items)} items")
-                    return items
-                else:
-                    logger.debug("No items in response")
-                    return []
-            except json.JSONDecodeError:
-                logger.warning("❌ Invalid JSON response")
-                if attempt < max_retries - 1:
-                    time.sleep(CONFIG["RETRY_DELAY"])
-                continue
-        
-        except requests.exceptions.ConnectTimeout:
-            logger.warning("⏱️ Connection timeout")
-            if attempt < max_retries - 1:
-                time.sleep(CONFIG["RETRY_DELAY"])
-        except requests.exceptions.ReadTimeout:
-            logger.warning("⏱️ Read timeout")
-            if attempt < max_retries - 1:
-                time.sleep(CONFIG["RETRY_DELAY"])
-        except Exception as e:
-            logger.warning(f"Error: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(CONFIG["RETRY_DELAY"])
-    
-    logger.error("❌ All retry attempts failed")
-    return []
-
-# ============================================================================
 # DATABASE OPERATIONS
 # ============================================================================
 
@@ -286,14 +191,14 @@ def item_exists(item_id: str) -> bool:
     except:
         return False
 
-def save_item(item_id: str, title: str, price: str, status: str, team: Optional[str] = None, reason: Optional[str] = None):
+def save_item(item_id: str, title: str, price: str, vinted_url: str, status: str, team: Optional[str] = None, reason: Optional[str] = None):
     """Save item to database"""
     try:
         conn = sqlite3.connect(CONFIG["DB_NAME"])
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT OR IGNORE INTO items (item_id, title, price, team, brand, status, reason_rejected)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO items (item_id, title, price, team, brand, status, vinted_url, reason_rejected)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             item_id,
             title,
@@ -301,6 +206,7 @@ def save_item(item_id: str, title: str, price: str, status: str, team: Optional[
             team,
             check_brand(title),
             status,
+            vinted_url,
             reason,
         ))
         conn.commit()
@@ -316,11 +222,9 @@ def send_discord(item_id: str, title: str, price: str, team: str):
     """Send Discord notification"""
     if not CONFIG["DISCORD_WEBHOOK_URL"]:
         return
-    
     try:
-        data = {
-            "embeds": [{"title": title[:256], "description": f"👥 **{team}** | 💰 **{price}**", "color": 65280}]
-        }
+        import requests
+        data = {"embeds": [{"title": title[:256], "description": f"👥 **{team}** | 💰 **{price}", "color": 65280}]}
         requests.post(CONFIG["DISCORD_WEBHOOK_URL"], json=data, timeout=5)
         logger.info("✅ Discord sent")
     except:
@@ -330,8 +234,8 @@ def send_telegram(item_id: str, title: str, price: str, team: str):
     """Send Telegram notification"""
     if not CONFIG["TELEGRAM_BOT_TOKEN"] or not CONFIG["TELEGRAM_CHAT_ID"]:
         return
-    
     try:
+        import requests
         text = f"🎯 *{title}*\n👥 {team}\n💰 {price}"
         url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
         requests.post(url, json={"chat_id": CONFIG["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "Markdown"}, timeout=5)
@@ -340,77 +244,154 @@ def send_telegram(item_id: str, title: str, price: str, team: str):
         pass
 
 # ============================================================================
+# SELENIUM BROWSER
+# ============================================================================
+
+def create_browser():
+    """Create Selenium Chrome browser with anti-detection settings"""
+    chrome_options = Options()
+    
+    if CONFIG["HEADLESS"]:
+        chrome_options.add_argument("--headless")
+    
+    # Anti-detection
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=chrome_options
+    )
+    return driver
+
+def fetch_vinted_items() -> List[Dict]:
+    """Fetch items from Vinted using Selenium"""
+    driver = None
+    items = []
+    
+    try:
+        logger.info("🌐 Starting browser...")
+        driver = create_browser()
+        driver.set_page_load_timeout(20)
+        
+        # Navigate to Vinted search
+        search_url = "https://www.vinted.it/items?search_text=tuta%20calcio&order=newest_first"
+        logger.info(f"📄 Loading {search_url}...")
+        driver.get(search_url)
+        
+        # Wait for items to load
+        logger.info("⏳ Waiting for items to load...")
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-testid='item-card']"))
+        )
+        
+        # Give extra time for JS rendering
+        time.sleep(3)
+        
+        # Find all item cards
+        item_elements = driver.find_elements(By.CSS_SELECTOR, "[data-testid='item-card']")
+        logger.info(f"📦 Found {len(item_elements)} items on page")
+        
+        for element in item_elements[:20]:  # Limit to 20 items
+            try:
+                # Extract item data
+                item_id = element.get_attribute("href").split("/items/")[-1] if element.get_attribute("href") else None
+                title_elem = element.find_element(By.CSS_SELECTOR, "[data-testid='item-title']")
+                price_elem = element.find_element(By.CSS_SELECTOR, "[data-testid='item-price']")
+                
+                if item_id and title_elem and price_elem:
+                    item = {
+                        "id": item_id,
+                        "title": title_elem.text,
+                        "price": price_elem.text,
+                        "url": element.get_attribute("href")
+                    }
+                    items.append(item)
+                    logger.debug(f"Extracted: {item['id']} - {item['title'][:50]}")
+            except Exception as e:
+                logger.debug(f"Error extracting item: {e}")
+                continue
+        
+        logger.info(f"✅ Successfully scraped {len(items)} items")
+    
+    except Exception as e:
+        logger.error(f"❌ Selenium error: {e}")
+    
+    finally:
+        if driver:
+            logger.info("🔒 Closing browser...")
+            driver.quit()
+    
+    return items
+
+# ============================================================================
 # MAIN LOOP
 # ============================================================================
 
 def monitor_vinted():
     """Main monitoring loop"""
-    logger.info("🚀 Starting Vinted Bot...")
+    logger.info("🚀 Starting Vinted Bot (Selenium Edition)...")
     logger.info(f"Discord: {'✅' if CONFIG['DISCORD_WEBHOOK_URL'] else '❌'}")
     logger.info(f"Telegram: {'✅' if CONFIG['TELEGRAM_BOT_TOKEN'] else '❌'}")
     
     init_database()
-    session = create_session()
     cycle = 0
     
     while True:
         try:
             cycle += 1
-            logger.info(f"\n📍 Cycle #{cycle} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"\n🔍 Cycle #{cycle} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # Try multiple search endpoints
-            endpoints = [
-                ("https://www.vinted.it/api/v2/items", {"search_text": "tuta calcio", "order": "newest_first", "per_page": 30}),
-                ("https://www.vinted.com/api/v2/items", {"search_text": "tuta calcio", "order": "newest_first", "per_page": 30}),
-            ]
+            items = fetch_vinted_items()
             
-            total_found = 0
+            if not items:
+                logger.warning("⚠️ No items found")
+                logger.info(f"⏳ Next check in {CONFIG['CHECK_INTERVAL']}s\n")
+                time.sleep(CONFIG['CHECK_INTERVAL'])
+                continue
+            
             total_approved = 0
-            
-            for endpoint, params in endpoints:
-                items = fetch_items_with_retry(session, endpoint, params)
+            for item in items:
+                item_id = str(item.get("id", ""))
+                title = item.get("title", "")
+                price = item.get("price", "N/A")
+                url = item.get("url", "")
                 
-                if not items:
+                if not item_id or not title:
                     continue
                 
-                total_found += len(items)
+                if item_exists(item_id):
+                    logger.debug(f"Already processed: {item_id}")
+                    continue
                 
-                for item in items:
-                    item_id = str(item.get("id", ""))
-                    title = item.get("title", "")
-                    price = item.get("price", "N/A")
-                    
-                    if not item_id or not title:
-                        continue
-                    
-                    if item_exists(item_id):
-                        logger.debug(f"Already processed: {item_id}")
-                        continue
-                    
-                    is_valid, reason = is_valid_tracksuit(title)
-                    
-                    if is_valid:
-                        team = check_team(title)
-                        total_approved += 1
-                        save_item(item_id, title, price, "approved", team)
-                        logger.info(f"✅ {item_id} | {title} | {team}")
-                        send_discord(item_id, title, price, team)
-                        send_telegram(item_id, title, price, team)
-                    else:
-                        save_item(item_id, title, price, "rejected", reason=reason)
-                        logger.debug(f"❌ {item_id} | {reason}")
+                is_valid, reason = is_valid_tracksuit(title)
+                
+                if is_valid:
+                    team = check_team(title)
+                    total_approved += 1
+                    save_item(item_id, title, price, url, "approved", team)
+                    logger.info(f"✅ {item_id} | {title} | {team}")
+                    send_discord(item_id, title, price, team)
+                    send_telegram(item_id, title, price, team)
+                else:
+                    save_item(item_id, title, price, url, "rejected", reason=reason)
+                    logger.debug(f"❌ {item_id} | {reason}")
             
-            logger.info(f"📊 Found: {total_found} | Approved: {total_approved}")
+            logger.info(f"📊 Found: {len(items)} | Approved: {total_approved}")
             logger.info(f"⏳ Next check in {CONFIG['CHECK_INTERVAL']}s\n")
             
-            time.sleep(CONFIG["CHECK_INTERVAL"])
+            time.sleep(CONFIG['CHECK_INTERVAL'])
         
         except KeyboardInterrupt:
             logger.info("\n🛑 Bot stopped")
             break
         except Exception as e:
             logger.error(f"💥 Error: {e}")
-            time.sleep(CONFIG["CHECK_INTERVAL"])
+            time.sleep(CONFIG['CHECK_INTERVAL'])
 
 # ============================================================================
 # ENTRY POINT
