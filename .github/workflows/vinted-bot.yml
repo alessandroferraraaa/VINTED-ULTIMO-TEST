@@ -1,0 +1,79 @@
+name: 🤖 Vinted Football Bot Monitor
+
+on:
+  # Trigger manualmente
+  workflow_dispatch:
+  
+  # O automaticamente ogni ora
+  schedule:
+    - cron: '0 * * * *'  # Ogni ora
+  
+  # O ogni 30 minuti (OPZIONALE - commentare se troppo frequente)
+  # - cron: '*/30 * * * *'
+
+jobs:
+  run-vinted-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1️⃣ Checkout del codice
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # 2️⃣ Setup Python
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      # 3️⃣ Cache pip (per velocizzare)
+      - name: 📦 Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      # 4️⃣ Installa dipendenze
+      - name: 📚 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install webdriver-manager
+      
+      # 5️⃣ Download ChromeDriver (per Selenium)
+      - name: 🌐 Setup Chrome and ChromeDriver
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: stable
+      
+      - name: 🔧 Setup ChromeDriver
+        uses: nanasess/setup-chromedriver@master
+      
+      # 6️⃣ Esegui il bot
+      - name: 🚀 Run Vinted Bot
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python vinted_bot.py
+        timeout-minutes: 10
+      
+      # 7️⃣ Upload logs (se fallisce)
+      - name: 📋 Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: vinted-bot-logs
+          path: vinted_bot.log
+          retention-days: 7
+      
+      # 8️⃣ Notifica Telegram se fallisce (OPZIONALE)
+      - name: 📲 Notify Telegram on failure
+        if: failure() && secrets.TELEGRAM_BOT_TOKEN
+        run: |
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=❌ Vinted Bot failed on GitHub Actions. Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
