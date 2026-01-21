@@ -40,7 +40,11 @@ CONFIG = {
     "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", ""),
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
-    "VINTED_URL": "https://www.vinted.it/items?search_text=tuta%20calcio&order=newest_first",
+    # Using Vinted API endpoints
+    "VINTED_API_URLS": [
+        "https://www.vinted.it/api/v2/items",
+        "https://www.vinted.com/api/v2/items",
+    ],
     "CHECK_INTERVAL": 60,
     "DB_NAME": "vinted_bot.db",
     "LOG_LEVEL": logging.INFO,
@@ -194,72 +198,61 @@ def create_session():
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "application/json, text/plain, */*",
         "Accept-Language": "it-IT,it;q=0.9",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
+        "Referer": "https://www.vinted.it/",
     })
     return session
 
-def fetch_items(session) -> List[Dict]:
-    """Fetch items from Vinted using requests + BeautifulSoup"""
+def fetch_items_api(session) -> List[Dict]:
+    """Fetch items from Vinted API"""
     items = []
-    try:
-        logger.info(f"🔍 Fetching from Vinted...")
-        response = session.get(CONFIG["VINTED_URL"], timeout=15)
-        
-        if response.status_code != 200:
-            logger.error(f"HTTP Error {response.status_code}")
-            return items
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        item_elements = soup.find_all('div', {'class': re.compile('.*item.*')})
-        logger.info(f"📦 Found {len(item_elements)} item elements")
-        
-        for elem in item_elements[:30]:
-            try:
-                title_elem = elem.find('span', {'class': re.compile('.*title.*')})
-                if not title_elem:
-                    title_elem = elem.find('h2')
-                
-                title = title_elem.text.strip() if title_elem else None
-                
-                link_elem = elem.find('a', href=True)
-                url = link_elem.get('href') if link_elem else None
-                
-                price_elem = elem.find('span', {'class': re.compile('.*price.*')})
-                price = price_elem.text.strip() if price_elem else "N/A"
-                
-                if not title or not url:
-                    continue
-                
-                item_id = url.split('/')[-1] if '/' in url else None
-                
-                if not item_id:
-                    continue
-                
-                item = {
-                    "id": item_id,
-                    "title": title,
-                    "price": price,
-                    "url": url if url.startswith('http') else f"https://www.vinted.it{url}"
-                }
-                
-                items.append(item)
-                logger.debug(f"Found item: {item_id} - {title[:50]}")
+    
+    search_params = {
+        "search_text": "tuta calcio",
+        "order": "newest_first",
+        "per_page": 30,
+        "page": 1,
+        "currency": "EUR"
+    }
+    
+    for api_url in CONFIG["VINTED_API_URLS"]:
+        try:
+            logger.info(f"🔍 Fetching from {api_url}...")
+            response = session.get(api_url, params=search_params, timeout=10)
             
-            except Exception as e:
-                logger.debug(f"Error parsing item: {e}")
-                continue
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get("items", [])
+                if items:
+                    logger.info(f"📦 Fetched {len(items)} items")
+                    return items
+            else:
+                logger.debug(f"API {api_url} returned {response.status_code}")
+        
+        except Exception as e:
+            logger.debug(f"Error fetching from {api_url}: {e}")
+            continue
+    
+    return items
+
+def fetch_items(session) -> List[Dict]:
+    """Fetch items from Vinted using API"""
+    try:
+        items = fetch_items_api(session)
+        
+        if not items:
+            logger.warning("⚠️ No items found from API")
+            return []
         
         logger.info(f"✅ Successfully extracted {len(items)} items")
+        return items
     
     except Exception as e:
         logger.error(f"Error fetching: {e}")
-    
-    return items
+        return []
 
 # ============================================================================
 # DATABASE OPERATIONS
@@ -292,7 +285,7 @@ def save_item(item: Dict, status: str, team: Optional[str] = None, reason: Optio
             team,
             check_brand(item.get("title", "")),
             status,
-            item.get("url"),
+            item.get("url") or f"https://www.vinted.it/items/{item.get('id')}",
             reason,
         ))
         conn.commit()
@@ -315,7 +308,6 @@ def send_discord(item: Dict, team: str):
                 "title": item.get("title", "N/A")[:256],
                 "description": f"**Team:** {team.upper()}\n**Price:** {item.get('price', 'N/A')}",
                 "color": 65280,
-                "url": item.get("url", ""),
                 "fields": [
                     {"name": "Brand", "value": check_brand(item.get("title", "")) or "N/A", "inline": True},
                     {"name": "Item ID", "value": item.get("id", "N/A"), "inline": True},
@@ -334,7 +326,7 @@ def send_telegram(item: Dict, team: str):
         return
     
     try:
-        text = f"🎯 *TRACKSUIT*\n*{item.get('title', 'N/A')}*\n👥 {team.upper()}\n💰 {item.get('price', 'N/A')}\n🔗 [View]({item.get('url', '')})"
+        text = f"🎯 *TRACKSUIT*\n*{item.get('title', 'N/A')}*\n👥 {team.upper()}\n💰 {item.get('price', 'N/A')}"
         url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
         requests.post(url, json={
             "chat_id": CONFIG["TELEGRAM_CHAT_ID"],
@@ -367,7 +359,7 @@ def monitor_vinted():
             items = fetch_items(session)
             
             if not items:
-                logger.warning("No items found")
+                logger.warning("⚠️ No items found")
                 time.sleep(CONFIG["CHECK_INTERVAL"])
                 continue
             
