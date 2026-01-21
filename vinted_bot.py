@@ -2,6 +2,7 @@
 VINTED FOOTBALL TRACKSUIT BOT 🔍⚽
 Monitor real-time adult complete football tracksuits (jacket + long pants)
 Strict filters: sizes S/M/L/XL only, approved teams/brands only
+Uses Selenium headless browser for reliable scraping
 Author: Advanced Bot Builder
 GitHub: https://github.com/alessandroferraraaa/VINTED-ULTIMO-TEST
 """
@@ -16,7 +17,11 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import sqlite3
 from pathlib import Path
-import threading
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 
 # ============================================================================
 # CONFIGURATION
@@ -30,14 +35,9 @@ CONFIG = {
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
     
-    # VINTED PARAMETERS
+    # VINTED SEARCH URLs
     "VINTED_URLS": [
-        "https://www.vinted.it/api/v2/catalog/items",
-        "https://www.vinted.de/api/v2/catalog/items",
-        "https://www.vinted.fr/api/v2/catalog/items",
-        "https://www.vinted.es/api/v2/catalog/items",
-        "https://www.vinted.nl/api/v2/catalog/items",
-        "https://www.vinted.be/api/v2/catalog/items",
+        "https://www.vinted.it/items?search_text=tuta%20calcio&order=newest_first",
     ],
     
     # MONITOR FREQUENCY (seconds)
@@ -104,7 +104,9 @@ APPROVED_COMBINATIONS = {
 ACCEPTABLE_CONDITIONS = {
     "Ottime condizioni",
     "Nuovo senza cartellino",
-    "Nuovo con cartellino"
+    "Nuovo con cartellino",
+    "Buone condizioni",
+    "Condizioni accettabili"
 }
 
 # ============================================================================
@@ -118,7 +120,7 @@ def init_database():
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS items (
-            item_id INTEGER PRIMARY KEY,
+            item_id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             price REAL,
             team TEXT,
@@ -136,7 +138,7 @@ def init_database():
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS notified (
-            item_id INTEGER PRIMARY KEY,
+            item_id TEXT PRIMARY KEY,
             notification_type TEXT,
             sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -202,136 +204,112 @@ def check_brand(title: str, description: str = "") -> Optional[str]:
     
     return None
 
-def is_complete_tracksuit(item: Dict) -> tuple[bool, str]:
+def is_complete_tracksuit(title: str) -> tuple[bool, str]:
     """
     Strictly validate if item is a complete tracksuit (jacket + long pants)
     Returns (is_valid, reason)
     """
-    title = item.get("title", "").lower()
-    description = item.get("description", "").lower()
+    title_lower = title.lower()
     
     # Check forbidden keywords first
-    if check_forbidden_keywords(title) or check_forbidden_keywords(description):
+    if check_forbidden_keywords(title_lower):
         return False, "Contains forbidden keywords"
     
     # Check for approved combination keywords
-    has_approved_combo = any(combo in title or combo in description 
-                            for combo in APPROVED_COMBINATIONS)
+    has_approved_combo = any(combo in title_lower for combo in APPROVED_COMBINATIONS)
     
     if not has_approved_combo:
         # Check minimal requirements
-        has_jacket = any(word in title for word in ["felpa", "giacca", "jacket", "hoodie"])
-        has_pants = any(word in title for word in ["pantalone", "pants", "trousers"])
+        has_jacket = any(word in title_lower for word in ["felpa", "giacca", "jacket", "hoodie"])
+        has_pants = any(word in title_lower for word in ["pantalone", "pants", "trousers"])
         
         if not (has_jacket and has_pants):
             return False, "Not a complete tracksuit (missing jacket or pants)"
     
-    # Size validation
-    size = item.get("size_title", "").strip()
-    if not check_size(size):
-        return False, f"Size '{size}' not allowed (only S/M/L/XL for adults)"
-    
     # Team validation
-    team = check_team(title, description)
+    team = check_team(title)
     if not team:
         return False, "Team not in approved list"
     
-    # Condition validation
-    condition = item.get("status", "")
-    if condition not in ACCEPTABLE_CONDITIONS:
-        return False, f"Condition '{condition}' not acceptable"
-    
     return True, "Valid tracksuit"
 
-def validate_item(item: Dict) -> tuple[bool, Optional[str], Optional[str]]:
-    """
-    Full item validation
-    Returns (is_valid, team, reason_if_rejected)
-    """
-    is_valid, reason = is_complete_tracksuit(item)
-    
-    if not is_valid:
-        logger.info(f"❌ Item rejected: {item.get('id')} - {reason}")
-        return False, None, reason
-    
-    team = check_team(item.get("title", ""), item.get("description", ""))
-    logger.info(f"✅ Item approved: {item.get('id')} - Team: {team}")
-    
-    return True, team, None
-
 # ============================================================================
-# VINTED API
+# SELENIUM BROWSER
 # ============================================================================
 
-def create_session() -> requests.Session:
-    """Create a requests session with proper headers to avoid 401 errors"""
-    session = requests.Session()
+def create_driver():
+    """Create Selenium webdriver with headless Chrome"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    )
     
-    # Realistic browser headers to avoid bot detection
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-    })
-    
-    return session
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
 
-def fetch_vinted_items(session: requests.Session, 
-                       url: str, 
-                       search_params: Dict) -> Optional[List[Dict]]:
-    """Fetch items from Vinted API with retry logic"""
-    max_retries = 3
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            response = session.get(url, params=search_params, timeout=10)
-            
-            if response.status_code == 429:
-                logger.warning("⚠️ Rate limit hit! Waiting 60 seconds...")
-                time.sleep(60)
-                retry_count += 1
-                continue
-            
-            if response.status_code == 401:
-                logger.warning("⚠️ 401 Unauthorized - Vinted may have changed API protection. Retrying...")
-                time.sleep(5)
-                retry_count += 1
-                continue
-            
-            if response.status_code != 200:
-                logger.error(f"API Error {response.status_code}: {response.text[:200]}")
-                return None
-            
-            data = response.json()
-            return data.get("items", [])
+def fetch_vinted_items(driver) -> List[Dict]:
+    """Fetch items from Vinted using Selenium"""
+    items = []
+    try:
+        url = CONFIG["VINTED_URLS"][0]
+        logger.info(f"🔍 Fetching from {url}")
         
-        except requests.exceptions.Timeout:
-            logger.error("⏱️ Request timeout")
-            retry_count += 1
-            time.sleep(3)
-            continue
-        except Exception as e:
-            logger.error(f"❌ Error fetching Vinted: {e}")
-            return None
+        driver.get(url)
+        time.sleep(3)  # Wait for page load
+        
+        # Wait for items to load
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CLASS_NAME, "item-card"))
+        )
+        
+        # Extract items
+        item_cards = driver.find_elements(By.CLASS_NAME, "item-card")
+        logger.info(f"📦 Found {len(item_cards)} items on page")
+        
+        for card in item_cards:
+            try:
+                # Extract title
+                title_elem = card.find_element(By.CLASS_NAME, "item-title")
+                title = title_elem.text.strip()
+                
+                # Extract URL
+                link_elem = card.find_element(By.TAG_NAME, "a")
+                url = link_elem.get_attribute("href")
+                item_id = url.split("/")[-1] if url else None
+                
+                if not item_id or not title:
+                    continue
+                
+                # Extract price (optional)
+                price_elem = card.find_elements(By.CLASS_NAME, "item-price")
+                price = price_elem[0].text.strip() if price_elem else "N/A"
+                
+                item = {
+                    "id": item_id,
+                    "title": title,
+                    "price": price,
+                    "url": url
+                }
+                
+                items.append(item)
+            except Exception as e:
+                logger.debug(f"⚠️ Error parsing item: {e}")
+                continue
     
-    logger.error("💯 Max retries exceeded for Vinted API")
-    return None
+    except Exception as e:
+        logger.error(f"❌ Error fetching Vinted: {e}")
+    
+    return items
 
 # ============================================================================
 # DATABASE OPERATIONS
 # ============================================================================
 
-def item_exists(item_id: int) -> bool:
+def item_exists(item_id: str) -> bool:
     """Check if item already recorded"""
     try:
         conn = sqlite3.connect(CONFIG["DB_NAME"])
@@ -351,23 +329,18 @@ def save_item(item: Dict, status: str, team: Optional[str] = None, reason: Optio
         cursor = conn.cursor()
         
         cursor.execute("""
-            INSERT INTO items (
-                item_id, title, price, team, brand, size, condition,
-                image_url, vinted_url, status, reason_rejected, published_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO items (
+                item_id, title, price, team, brand, status, vinted_url, reason_rejected
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             item.get("id"),
             item.get("title"),
             item.get("price"),
             team,
             check_brand(item.get("title", "")),
-            item.get("size_title"),
-            item.get("status"),
-            item.get("photo", {}).get("full_size_url"),
-            f"https://www.vinted.it/items/{item.get('id')}",
             status,
+            item.get("url"),
             reason,
-            datetime.fromtimestamp(item.get("created_at_ts", 0))
         ))
         
         conn.commit()
@@ -375,13 +348,13 @@ def save_item(item: Dict, status: str, team: Optional[str] = None, reason: Optio
     except Exception as e:
         logger.error(f"DB save error: {e}")
 
-def mark_notified(item_id: int, notification_type: str):
+def mark_notified(item_id: str, notification_type: str):
     """Mark item as notified"""
     try:
         conn = sqlite3.connect(CONFIG["DB_NAME"])
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO notified (item_id, notification_type) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO notified (item_id, notification_type) VALUES (?, ?)",
             (item_id, notification_type)
         )
         conn.commit()
@@ -401,18 +374,13 @@ def send_discord_notification(item: Dict, team: str):
     try:
         embed = {
             "title": item.get("title", "N/A")[:256],
-            "description": f"**Team:** {team.upper()}\n**Price:** €{item.get('price', 'N/A')}\n**Size:** {item.get('size_title', 'N/A')}",
+            "description": f"**Team:** {team.upper()}\n**Price:** {item.get('price', 'N/A')}",
             "color": 0x00FF00,
-            "thumbnail": {
-                "url": item.get("photo", {}).get("full_size_url", "")
-            },
             "fields": [
                 {"name": "Brand", "value": check_brand(item.get("title", "")) or "N/A", "inline": True},
-                {"name": "Condition", "value": item.get("status", "N/A"), "inline": True},
                 {"name": "Item ID", "value": str(item.get("id", "N/A")), "inline": True},
-                {"name": "Published", "value": datetime.fromtimestamp(item.get("created_at_ts", 0)).strftime("%H:%M:%S"), "inline": True},
             ],
-            "url": f"https://www.vinted.it/items/{item.get('id')}",
+            "url": item.get("url", ""),
             "timestamp": datetime.now().isoformat()
         }
         
@@ -438,12 +406,8 @@ def send_telegram_notification(item: Dict, team: str):
             f"🎯 *TRACKSUIT FOUND*\n\n"
             f"*{item.get('title', 'N/A')}*\n"
             f"👥 Team: {team.upper()}\n"
-            f"💰 Price: €{item.get('price', 'N/A')}\n"
-            f"👕 Size: {item.get('size_title', 'N/A')}\n"
-            f"📦 Condition: {item.get('status', 'N/A')}\n"
-            f"🏷️ ID: {item.get('id', 'N/A')}\n"
-            f"⏰ Published: {datetime.fromtimestamp(item.get('created_at_ts', 0)).strftime('%H:%M:%S')}\n"
-            f"🔗 [View on Vinted](https://www.vinted.it/items/{item.get('id')})"
+            f"💰 Price: {item.get('price', 'N/A')}\n"
+            f"🔗 [View on Vinted]({item.get('url', '')})"
         )
         
         url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
@@ -471,40 +435,36 @@ def send_telegram_notification(item: Dict, team: str):
 
 def monitor_vinted():
     """Main monitoring loop"""
-    logger.info("🚀 Starting Vinted Football Tracksuit Bot...")
+    logger.info("🚀 Starting Vinted Football Tracksuit Bot (Selenium)...")
     logger.info(f"📧 Discord enabled: {'✅' if CONFIG['DISCORD_WEBHOOK_URL'] else '❌'}")
     logger.info(f"📱 Telegram enabled: {'✅' if CONFIG['TELEGRAM_BOT_TOKEN'] and CONFIG['TELEGRAM_CHAT_ID'] else '❌'}")
     
     init_database()
     
-    session = create_session()
-    search_params = {
-        "search_text": "tuta calcio",
-        "order": "newest_first",
-        "per_page": 30,
-        "page": 1,
-        "currency": "EUR"
-    }
-    
+    driver = None
     cycle = 0
     
-    while True:
-        try:
-            cycle += 1
-            logger.info(f"\n📍 Cycle #{cycle} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            found_count = 0
-            approved_count = 0
-            
-            for vinted_url in CONFIG["VINTED_URLS"]:
-                items = fetch_vinted_items(session, vinted_url, search_params)
+    try:
+        driver = create_driver()
+        logger.info("🌐 Selenium driver initialized")
+        
+        while True:
+            try:
+                cycle += 1
+                logger.info(f"\n📍 Cycle #{cycle} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Fetch items
+                items = fetch_vinted_items(driver)
                 
                 if not items:
+                    logger.warning("⚠️ No items found")
+                    time.sleep(CONFIG["CHECK_INTERVAL"])
                     continue
+                
+                approved_count = 0
                 
                 for item in items:
                     item_id = item.get("id")
-                    found_count += 1
                     
                     # Skip if already processed
                     if item_exists(item_id):
@@ -512,29 +472,38 @@ def monitor_vinted():
                         continue
                     
                     # Validate item
-                    is_valid, team, reason = validate_item(item)
+                    is_valid, reason = is_complete_tracksuit(item.get("title", ""))
                     
                     if is_valid:
+                        team = check_team(item.get("title", ""))
                         approved_count += 1
                         save_item(item, "approved", team)
+                        
+                        logger.info(f"✅ Item approved: {item_id} - Team: {team}")
                         
                         # Send notifications
                         send_discord_notification(item, team)
                         send_telegram_notification(item, team)
                     else:
                         save_item(item, "rejected", reason=reason)
+                        logger.info(f"❌ Item rejected: {item_id} - {reason}")
+                
+                logger.info(f"📊 Cycle Summary: {len(items)} items scanned, {approved_count} approved")
+                logger.info(f"⏳ Next check in {CONFIG['CHECK_INTERVAL']}s...\n")
+                
+                time.sleep(CONFIG["CHECK_INTERVAL"])
             
-            logger.info(f"📊 Cycle Summary: {found_count} items scanned, {approved_count} approved")
-            logger.info(f"⏳ Next check in {CONFIG['CHECK_INTERVAL']}s...\n")
-            
-            time.sleep(CONFIG["CHECK_INTERVAL"])
-        
-        except KeyboardInterrupt:
-            logger.info("\n🛑 Bot stopped by user")
-            break
-        except Exception as e:
-            logger.error(f"💥 Unexpected error: {e}")
-            time.sleep(CONFIG["CHECK_INTERVAL"])
+            except KeyboardInterrupt:
+                logger.info("\n🛑 Bot stopped by user")
+                break
+            except Exception as e:
+                logger.error(f"💥 Cycle error: {e}")
+                time.sleep(CONFIG["CHECK_INTERVAL"])
+    
+    finally:
+        if driver:
+            driver.quit()
+            logger.info("🚪 Selenium driver closed")
 
 # ============================================================================
 # ENTRY POINT
