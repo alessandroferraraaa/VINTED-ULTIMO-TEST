@@ -2,13 +2,12 @@
 """
 VINTED FOOTBALL TRACKSUIT BOT 🔍⚽
 Monitor real-time adult complete football tracksuits (jacket + long pants)
-Standalone version: Handles dependencies automatically
+Browser-like requests to bypass anti-scraping
 """
 
 import sys
 import subprocess
 
-# Auto-install dependencies
 try:
     import requests
 except ImportError:
@@ -16,38 +15,28 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
     import requests
 
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    print("[INSTALLING] beautifulsoup4...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4"])
-    from bs4 import BeautifulSoup
-
 import json
 import time
 import logging
 import re
-import os
 from datetime import datetime
 from typing import Dict, List, Optional
 import sqlite3
+import random
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 CONFIG = {
-    "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", ""),
-    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
-    "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
-    # Using Vinted API endpoints
-    "VINTED_API_URLS": [
-        "https://www.vinted.it/api/v2/items",
-        "https://www.vinted.com/api/v2/items",
-    ],
+    "DISCORD_WEBHOOK_URL": "",
+    "TELEGRAM_BOT_TOKEN": "",
+    "TELEGRAM_CHAT_ID": "",
     "CHECK_INTERVAL": 60,
     "DB_NAME": "vinted_bot.db",
     "LOG_LEVEL": logging.INFO,
+    "RETRY_ATTEMPTS": 3,
+    "RETRY_DELAY": 2,
 }
 
 # ============================================================================
@@ -178,8 +167,8 @@ def is_valid_tracksuit(title: str) -> tuple:
     has_approved_combo = any(combo in title_lower for combo in APPROVED_COMBINATIONS)
     
     if not has_approved_combo:
-        has_jacket = any(word in title_lower for word in ["felpa", "giacca", "jacket", "hoodie"])
-        has_pants = any(word in title_lower for word in ["pantalone", "pants", "trousers"])
+        has_jacket = any(word in title_lower for word in ["felpa", "giacca", "jacket", "hoodie", "tuta"])
+        has_pants = any(word in title_lower for word in ["pantalone", "pants", "trousers", "tuta"])
         if not (has_jacket and has_pants):
             return False, "Not a complete tracksuit"
     
@@ -193,66 +182,93 @@ def is_valid_tracksuit(title: str) -> tuple:
 # WEB SCRAPING
 # ============================================================================
 
-def create_session():
-    """Create requests session with proper headers"""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+def get_browser_headers():
+    """Get realistic browser headers"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+    
+    return {
+        "User-Agent": random.choice(user_agents),
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "it-IT,it;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "DNT": "1",
         "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
         "Referer": "https://www.vinted.it/",
-    })
+    }
+
+def create_session():
+    """Create requests session with realistic settings"""
+    session = requests.Session()
+    session.headers.update(get_browser_headers())
+    session.timeout = 15
     return session
 
-def fetch_items_api(session) -> List[Dict]:
-    """Fetch items from Vinted API"""
-    items = []
-    
-    search_params = {
-        "search_text": "tuta calcio",
-        "order": "newest_first",
-        "per_page": 30,
-        "page": 1,
-        "currency": "EUR"
-    }
-    
-    for api_url in CONFIG["VINTED_API_URLS"]:
+def fetch_items_with_retry(session, url, params, max_retries=3):
+    """Fetch items from Vinted with retry logic"""
+    for attempt in range(max_retries):
         try:
-            logger.info(f"🔍 Fetching from {api_url}...")
-            response = session.get(api_url, params=search_params, timeout=10)
+            logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} - Fetching {url}...")
             
-            if response.status_code == 200:
+            response = session.get(url, params=params, timeout=15)
+            
+            if response.status_code == 429:
+                wait_time = 30 * (attempt + 1)
+                logger.warning(f"⏸️ Rate limited! Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            
+            if response.status_code == 403:
+                logger.warning(f"🚫 Forbidden (403) - Vinted blocking requests. Waiting 120s...")
+                time.sleep(120)
+                continue
+            
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Status {response.status_code}")
+                if attempt < max_retries - 1:
+                    time.sleep(CONFIG["RETRY_DELAY"] * (attempt + 1))
+                continue
+            
+            try:
                 data = response.json()
                 items = data.get("items", [])
                 if items:
-                    logger.info(f"📦 Fetched {len(items)} items")
+                    logger.info(f"✅ Successfully fetched {len(items)} items")
                     return items
-            else:
-                logger.debug(f"API {api_url} returned {response.status_code}")
+                else:
+                    logger.debug("No items in response")
+                    return []
+            except json.JSONDecodeError:
+                logger.warning("❌ Invalid JSON response")
+                if attempt < max_retries - 1:
+                    time.sleep(CONFIG["RETRY_DELAY"])
+                continue
         
+        except requests.exceptions.ConnectTimeout:
+            logger.warning("⏱️ Connection timeout")
+            if attempt < max_retries - 1:
+                time.sleep(CONFIG["RETRY_DELAY"])
+        except requests.exceptions.ReadTimeout:
+            logger.warning("⏱️ Read timeout")
+            if attempt < max_retries - 1:
+                time.sleep(CONFIG["RETRY_DELAY"])
         except Exception as e:
-            logger.debug(f"Error fetching from {api_url}: {e}")
-            continue
+            logger.warning(f"Error: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(CONFIG["RETRY_DELAY"])
     
-    return items
-
-def fetch_items(session) -> List[Dict]:
-    """Fetch items from Vinted using API"""
-    try:
-        items = fetch_items_api(session)
-        
-        if not items:
-            logger.warning("⚠️ No items found from API")
-            return []
-        
-        logger.info(f"✅ Successfully extracted {len(items)} items")
-        return items
-    
-    except Exception as e:
-        logger.error(f"Error fetching: {e}")
-        return []
+    logger.error("❌ All retry attempts failed")
+    return []
 
 # ============================================================================
 # DATABASE OPERATIONS
@@ -270,22 +286,21 @@ def item_exists(item_id: str) -> bool:
     except:
         return False
 
-def save_item(item: Dict, status: str, team: Optional[str] = None, reason: Optional[str] = None):
+def save_item(item_id: str, title: str, price: str, status: str, team: Optional[str] = None, reason: Optional[str] = None):
     """Save item to database"""
     try:
         conn = sqlite3.connect(CONFIG["DB_NAME"])
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT OR IGNORE INTO items (item_id, title, price, team, brand, status, vinted_url, reason_rejected)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO items (item_id, title, price, team, brand, status, reason_rejected)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            item.get("id"),
-            item.get("title"),
-            item.get("price"),
+            item_id,
+            title,
+            price,
             team,
-            check_brand(item.get("title", "")),
+            check_brand(title),
             status,
-            item.get("url") or f"https://www.vinted.it/items/{item.get('id')}",
             reason,
         ))
         conn.commit()
@@ -297,45 +312,32 @@ def save_item(item: Dict, status: str, team: Optional[str] = None, reason: Optio
 # NOTIFICATIONS
 # ============================================================================
 
-def send_discord(item: Dict, team: str):
+def send_discord(item_id: str, title: str, price: str, team: str):
     """Send Discord notification"""
     if not CONFIG["DISCORD_WEBHOOK_URL"]:
         return
     
     try:
         data = {
-            "embeds": [{
-                "title": item.get("title", "N/A")[:256],
-                "description": f"**Team:** {team.upper()}\n**Price:** {item.get('price', 'N/A')}",
-                "color": 65280,
-                "fields": [
-                    {"name": "Brand", "value": check_brand(item.get("title", "")) or "N/A", "inline": True},
-                    {"name": "Item ID", "value": item.get("id", "N/A"), "inline": True},
-                ],
-            }]
+            "embeds": [{"title": title[:256], "description": f"👥 **{team}** | 💰 **{price}**", "color": 65280}]
         }
-        response = requests.post(CONFIG["DISCORD_WEBHOOK_URL"], json=data, timeout=5)
-        if response.status_code == 204:
-            logger.info("✅ Discord sent")
-    except Exception as e:
-        logger.warning(f"Discord error: {e}")
+        requests.post(CONFIG["DISCORD_WEBHOOK_URL"], json=data, timeout=5)
+        logger.info("✅ Discord sent")
+    except:
+        pass
 
-def send_telegram(item: Dict, team: str):
+def send_telegram(item_id: str, title: str, price: str, team: str):
     """Send Telegram notification"""
     if not CONFIG["TELEGRAM_BOT_TOKEN"] or not CONFIG["TELEGRAM_CHAT_ID"]:
         return
     
     try:
-        text = f"🎯 *TRACKSUIT*\n*{item.get('title', 'N/A')}*\n👥 {team.upper()}\n💰 {item.get('price', 'N/A')}"
+        text = f"🎯 *{title}*\n👥 {team}\n💰 {price}"
         url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
-        requests.post(url, json={
-            "chat_id": CONFIG["TELEGRAM_CHAT_ID"],
-            "text": text,
-            "parse_mode": "Markdown"
-        }, timeout=5)
+        requests.post(url, json={"chat_id": CONFIG["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "Markdown"}, timeout=5)
         logger.info("✅ Telegram sent")
-    except Exception as e:
-        logger.warning(f"Telegram error: {e}")
+    except:
+        pass
 
 # ============================================================================
 # MAIN LOOP
@@ -356,36 +358,50 @@ def monitor_vinted():
             cycle += 1
             logger.info(f"\n📍 Cycle #{cycle} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
-            items = fetch_items(session)
+            # Try multiple search endpoints
+            endpoints = [
+                ("https://www.vinted.it/api/v2/items", {"search_text": "tuta calcio", "order": "newest_first", "per_page": 30}),
+                ("https://www.vinted.com/api/v2/items", {"search_text": "tuta calcio", "order": "newest_first", "per_page": 30}),
+            ]
             
-            if not items:
-                logger.warning("⚠️ No items found")
-                time.sleep(CONFIG["CHECK_INTERVAL"])
-                continue
+            total_found = 0
+            total_approved = 0
             
-            approved = 0
-            for item in items:
-                item_id = item.get("id")
+            for endpoint, params in endpoints:
+                items = fetch_items_with_retry(session, endpoint, params)
                 
-                if item_exists(item_id):
-                    logger.debug(f"Already processed: {item_id}")
+                if not items:
                     continue
                 
-                is_valid, reason = is_valid_tracksuit(item.get("title", ""))
+                total_found += len(items)
                 
-                if is_valid:
-                    team = check_team(item.get("title", ""))
-                    approved += 1
-                    save_item(item, "approved", team)
-                    logger.info(f"✅ Approved: {item_id} - {team}")
-                    send_discord(item, team)
-                    send_telegram(item, team)
-                else:
-                    save_item(item, "rejected", reason=reason)
-                    logger.info(f"❌ Rejected: {item_id} - {reason}")
+                for item in items:
+                    item_id = str(item.get("id", ""))
+                    title = item.get("title", "")
+                    price = item.get("price", "N/A")
+                    
+                    if not item_id or not title:
+                        continue
+                    
+                    if item_exists(item_id):
+                        logger.debug(f"Already processed: {item_id}")
+                        continue
+                    
+                    is_valid, reason = is_valid_tracksuit(title)
+                    
+                    if is_valid:
+                        team = check_team(title)
+                        total_approved += 1
+                        save_item(item_id, title, price, "approved", team)
+                        logger.info(f"✅ {item_id} | {title} | {team}")
+                        send_discord(item_id, title, price, team)
+                        send_telegram(item_id, title, price, team)
+                    else:
+                        save_item(item_id, title, price, "rejected", reason=reason)
+                        logger.debug(f"❌ {item_id} | {reason}")
             
-            logger.info(f"📊 Cycle: {len(items)} scanned, {approved} approved")
-            logger.info(f"⏳ Next in {CONFIG['CHECK_INTERVAL']}s...\n")
+            logger.info(f"📊 Found: {total_found} | Approved: {total_approved}")
+            logger.info(f"⏳ Next check in {CONFIG['CHECK_INTERVAL']}s\n")
             
             time.sleep(CONFIG["CHECK_INTERVAL"])
         
