@@ -1,13 +1,28 @@
+#!/usr/bin/env python3
 """
 VINTED FOOTBALL TRACKSUIT BOT 🔍⚽
 Monitor real-time adult complete football tracksuits (jacket + long pants)
-Strict filters: sizes S/M/L/XL only, approved teams/brands only
-Simplified: Uses web scraping with requests only (no Selenium)
-Author: Advanced Bot Builder
-GitHub: https://github.com/alessandroferraraaa/VINTED-ULTIMO-TEST
+Standalone version: Handles dependencies automatically
 """
 
-import requests
+import sys
+import subprocess
+
+# Auto-install dependencies
+try:
+    import requests
+except ImportError:
+    print("[INSTALLING] requests...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
+    import requests
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    print("[INSTALLING] beautifulsoup4...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4"])
+    from bs4 import BeautifulSoup
+
 import json
 import time
 import logging
@@ -16,31 +31,18 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional
 import sqlite3
-from pathlib import Path
-from bs4 import BeautifulSoup
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 CONFIG = {
-    # DISCORD WEBHOOK (read from environment)
     "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", ""),
-    
-    # TELEGRAM (read from environment)
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
-    
-    # VINTED SEARCH URL
     "VINTED_URL": "https://www.vinted.it/items?search_text=tuta%20calcio&order=newest_first",
-    
-    # MONITOR FREQUENCY (seconds)
     "CHECK_INTERVAL": 60,
-    
-    # DATABASE
     "DB_NAME": "vinted_bot.db",
-    
-    # LOGLEVEL
     "LOG_LEVEL": logging.INFO,
 }
 
@@ -76,7 +78,6 @@ APPROVED_BRANDS = {
 
 ALLOWED_SIZES = {"XS", "S", "M", "L", "XL"}
 
-# FORBIDDEN KEYWORDS
 FORBIDDEN_KEYWORDS = {
     "solo pantalone", "solo felpa", "joggers", "bottom", "piece 1",
     "short", "shorts", "maillot", "kids", "junior", "academy",
@@ -163,15 +164,13 @@ def check_brand(title: str) -> Optional[str]:
     
     return None
 
-def is_valid_tracksuit(title: str) -> tuple[bool, str]:
+def is_valid_tracksuit(title: str) -> tuple:
     """Validate if title matches tracksuit criteria"""
     title_lower = title.lower()
     
-    # Check forbidden keywords
     if check_forbidden_keywords(title_lower):
         return False, "Forbidden keywords"
     
-    # Check for approved combination
     has_approved_combo = any(combo in title_lower for combo in APPROVED_COMBINATIONS)
     
     if not has_approved_combo:
@@ -180,7 +179,6 @@ def is_valid_tracksuit(title: str) -> tuple[bool, str]:
         if not (has_jacket and has_pants):
             return False, "Not a complete tracksuit"
     
-    # Check team
     team = check_team(title)
     if not team:
         return False, "Team not approved"
@@ -191,7 +189,7 @@ def is_valid_tracksuit(title: str) -> tuple[bool, str]:
 # WEB SCRAPING
 # ============================================================================
 
-def create_session() -> requests.Session:
+def create_session():
     """Create requests session with proper headers"""
     session = requests.Session()
     session.headers.update({
@@ -204,7 +202,7 @@ def create_session() -> requests.Session:
     })
     return session
 
-def fetch_items(session: requests.Session) -> List[Dict]:
+def fetch_items(session) -> List[Dict]:
     """Fetch items from Vinted using requests + BeautifulSoup"""
     items = []
     try:
@@ -217,31 +215,26 @@ def fetch_items(session: requests.Session) -> List[Dict]:
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Find all item containers
         item_elements = soup.find_all('div', {'class': re.compile('.*item.*')})
         logger.info(f"📦 Found {len(item_elements)} item elements")
         
-        for elem in item_elements[:30]:  # Limit to 30 items
+        for elem in item_elements[:30]:
             try:
-                # Extract title
                 title_elem = elem.find('span', {'class': re.compile('.*title.*')})
                 if not title_elem:
                     title_elem = elem.find('h2')
                 
                 title = title_elem.text.strip() if title_elem else None
                 
-                # Extract URL
                 link_elem = elem.find('a', href=True)
                 url = link_elem.get('href') if link_elem else None
                 
-                # Extract price
                 price_elem = elem.find('span', {'class': re.compile('.*price.*')})
                 price = price_elem.text.strip() if price_elem else "N/A"
                 
                 if not title or not url:
                     continue
                 
-                # Extract item ID from URL
                 item_id = url.split('/')[-1] if '/' in url else None
                 
                 if not item_id:
@@ -371,7 +364,6 @@ def monitor_vinted():
             cycle += 1
             logger.info(f"\n📍 Cycle #{cycle} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # Fetch items
             items = fetch_items(session)
             
             if not items:
