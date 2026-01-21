@@ -11,6 +11,7 @@ import json
 import time
 import logging
 import re
+import os
 from datetime import datetime
 from typing import Dict, List, Optional
 import sqlite3
@@ -22,12 +23,12 @@ import threading
 # ============================================================================
 
 CONFIG = {
-    # DISCORD WEBHOOK (optional)
-    "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/1463620269716541724/rJxqC0ChU3cEWpNoggTBlS6UsWA7iRxFlttYxDU-_4KqIdGQH-qKFrNA2haPWw_nFBu3",  # Leave empty to disable
+    # DISCORD WEBHOOK (read from environment or config)
+    "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", ""),
     
-    # TELEGRAM WEBHOOK (optional)
-    "TELEGRAM_BOT_TOKEN": "",   # Leave empty to disable
-    "TELEGRAM_CHAT_ID": "",
+    # TELEGRAM (read from environment or config)
+    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
+    "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
     
     # VINTED PARAMETERS
     "VINTED_URLS": [
@@ -444,6 +445,9 @@ def send_telegram_notification(item: Dict, team: str):
 def monitor_vinted():
     """Main monitoring loop"""
     logger.info("🚀 Starting Vinted Football Tracksuit Bot...")
+    logger.info(f"📧 Discord enabled: {'✅' if CONFIG['DISCORD_WEBHOOK_URL'] else '❌'}")
+    logger.info(f"📱 Telegram enabled: {'✅' if CONFIG['TELEGRAM_BOT_TOKEN'] and CONFIG['TELEGRAM_CHAT_ID'] else '❌'}")
+    
     init_database()
     
     session = create_session()
