@@ -40,10 +40,10 @@ CONFIG = {
     "DISCORD_WEBHOOK_URL": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_CHAT_ID": "",
-    "CHECK_INTERVAL": 120,  # Increased for Selenium
+    "CHECK_INTERVAL": 120,
     "DB_NAME": "vinted_bot.db",
     "LOG_LEVEL": logging.INFO,
-    "HEADLESS": True,  # Run without GUI
+    "HEADLESS": True,
 }
 
 # ============================================================================
@@ -224,7 +224,7 @@ def send_discord(item_id: str, title: str, price: str, team: str):
         return
     try:
         import requests
-        data = {"embeds": [{"title": title[:256], "description": f"👥 **{team}** | 💰 **{price}", "color": 65280}]}
+        data = {"embeds": [{"title": title[:256], "description": f"👥 **{team}** | 💰 **{price}**", "color": 65280}]}
         requests.post(CONFIG["DISCORD_WEBHOOK_URL"], json=data, timeout=5)
         logger.info("✅ Discord sent")
     except:
@@ -236,7 +236,7 @@ def send_telegram(item_id: str, title: str, price: str, team: str):
         return
     try:
         import requests
-        text = f"🎯 *{title}*\n👥 {team}\n💰 {price}"
+        text = f"🏐 *{title}*\n👥 {team}\n💰 {price}"
         url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
         requests.post(url, json={"chat_id": CONFIG["TELEGRAM_CHAT_ID"], "text": text, "parse_mode": "Markdown"}, timeout=5)
         logger.info("✅ Telegram sent")
@@ -254,7 +254,6 @@ def create_browser():
     if CONFIG["HEADLESS"]:
         chrome_options.add_argument("--headless")
     
-    # Anti-detection
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -269,7 +268,7 @@ def create_browser():
     return driver
 
 def fetch_vinted_items() -> List[Dict]:
-    """Fetch items from Vinted using Selenium"""
+    """Fetch items from Vinted using Selenium with robust selectors"""
     driver = None
     items = []
     
@@ -278,53 +277,94 @@ def fetch_vinted_items() -> List[Dict]:
         driver = create_browser()
         driver.set_page_load_timeout(20)
         
-        # Navigate to Vinted search
         search_url = "https://www.vinted.it/items?search_text=tuta%20calcio&order=newest_first"
         logger.info(f"📄 Loading {search_url}...")
         driver.get(search_url)
         
-        # Wait for items to load
-        logger.info("⏳ Waiting for items to load...")
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-testid='item-card']"))
-        )
+        logger.info("⏳ Waiting for page to load...")
+        time.sleep(5)
         
-        # Give extra time for JS rendering
-        time.sleep(3)
+        # Try multiple selector strategies
+        item_elements = []
+        selectors_to_try = [
+            (By.CSS_SELECTOR, "a[href*='/items/']"),
+            (By.CSS_SELECTOR, "article"),
+            (By.CSS_SELECTOR, "[class*='item']"),
+            (By.XPATH, "//a[@href and contains(@href, '/items/')]"),
+        ]
         
-        # Find all item cards
-        item_elements = driver.find_elements(By.CSS_SELECTOR, "[data-testid='item-card']")
-        logger.info(f"📦 Found {len(item_elements)} items on page")
-        
-        for element in item_elements[:20]:  # Limit to 20 items
+        for selector_type, selector in selectors_to_try:
             try:
-                # Extract item data
-                item_id = element.get_attribute("href").split("/items/")[-1] if element.get_attribute("href") else None
-                title_elem = element.find_element(By.CSS_SELECTOR, "[data-testid='item-title']")
-                price_elem = element.find_element(By.CSS_SELECTOR, "[data-testid='item-price']")
+                logger.info(f"🔍 Trying selector: {selector}")
+                elements = driver.find_elements(selector_type, selector)
+                if elements and len(elements) > 5:
+                    logger.info(f"✅ Found {len(elements)} elements with selector: {selector}")
+                    item_elements = elements
+                    break
+            except Exception as e:
+                logger.debug(f"Selector {selector} failed: {e}")
+                continue
+        
+        if not item_elements:
+            logger.warning("⚠️ No items found with any selector")
+            logger.info("📸 Page source preview (first 2000 chars):")
+            logger.info(driver.page_source[:2000])
+            return items
+        
+        logger.info(f"🎯 Processing {len(item_elements)} items...")
+        
+        for element in item_elements[:30]:
+            try:
+                href = element.get_attribute("href") or ""
+                if "/items/" not in href:
+                    continue
                 
-                if item_id and title_elem and price_elem:
+                item_id = href.split("/items/")[-1].split("?")[0]
+                if not item_id or not item_id.isdigit():
+                    continue
+                
+                text_content = element.text or ""
+                lines = [line.strip() for line in text_content.split("\n") if line.strip()]
+                
+                if not lines:
+                    continue
+                
+                title = lines[0]
+                
+                price = "N/A"
+                for line in lines:
+                    if "€" in line or any(c.isdigit() for c in line):
+                        price = line
+                        break
+                
+                if title and len(title) > 5:
                     item = {
                         "id": item_id,
-                        "title": title_elem.text,
-                        "price": price_elem.text,
-                        "url": element.get_attribute("href")
+                        "title": title,
+                        "price": price,
+                        "url": href
                     }
                     items.append(item)
-                    logger.debug(f"Extracted: {item['id']} - {item['title'][:50]}")
+                    logger.debug(f"✓ Extracted: {item_id} - {title[:40]}")
+            
             except Exception as e:
                 logger.debug(f"Error extracting item: {e}")
                 continue
         
-        logger.info(f"✅ Successfully scraped {len(items)} items")
+        logger.info(f"🎉 Successfully scraped {len(items)} valid items")
     
     except Exception as e:
         logger.error(f"❌ Selenium error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     
     finally:
         if driver:
             logger.info("🔒 Closing browser...")
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass
     
     return items
 
@@ -391,6 +431,8 @@ def monitor_vinted():
             break
         except Exception as e:
             logger.error(f"💥 Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             time.sleep(CONFIG['CHECK_INTERVAL'])
 
 # ============================================================================
