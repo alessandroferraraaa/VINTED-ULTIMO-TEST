@@ -264,41 +264,68 @@ def validate_item(item: Dict) -> tuple[bool, Optional[str], Optional[str]]:
 # ============================================================================
 
 def create_session() -> requests.Session:
-    """Create a requests session with proper headers"""
+    """Create a requests session with proper headers to avoid 401 errors"""
     session = requests.Session()
+    
+    # Realistic browser headers to avoid bot detection
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "it-IT,it;q=0.9",
-        "Cache-Control": "no-cache"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
     })
+    
     return session
 
 def fetch_vinted_items(session: requests.Session, 
                        url: str, 
                        search_params: Dict) -> Optional[List[Dict]]:
-    """Fetch items from Vinted API"""
-    try:
-        response = session.get(url, params=search_params, timeout=10)
-        
-        if response.status_code == 429:
-            logger.warning("⚠️ Rate limit hit! Waiting 60 seconds...")
-            time.sleep(60)
-            return None
-        
-        if response.status_code != 200:
-            logger.error(f"API Error {response.status_code}: {response.text}")
-            return None
-        
-        data = response.json()
-        return data.get("items", [])
+    """Fetch items from Vinted API with retry logic"""
+    max_retries = 3
+    retry_count = 0
     
-    except requests.exceptions.Timeout:
-        logger.error("⏱️ Request timeout")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Error fetching Vinted: {e}")
-        return None
+    while retry_count < max_retries:
+        try:
+            response = session.get(url, params=search_params, timeout=10)
+            
+            if response.status_code == 429:
+                logger.warning("⚠️ Rate limit hit! Waiting 60 seconds...")
+                time.sleep(60)
+                retry_count += 1
+                continue
+            
+            if response.status_code == 401:
+                logger.warning("⚠️ 401 Unauthorized - Vinted may have changed API protection. Retrying...")
+                time.sleep(5)
+                retry_count += 1
+                continue
+            
+            if response.status_code != 200:
+                logger.error(f"API Error {response.status_code}: {response.text[:200]}")
+                return None
+            
+            data = response.json()
+            return data.get("items", [])
+        
+        except requests.exceptions.Timeout:
+            logger.error("⏱️ Request timeout")
+            retry_count += 1
+            time.sleep(3)
+            continue
+        except Exception as e:
+            logger.error(f"❌ Error fetching Vinted: {e}")
+            return None
+    
+    logger.error("💯 Max retries exceeded for Vinted API")
+    return None
 
 # ============================================================================
 # DATABASE OPERATIONS
